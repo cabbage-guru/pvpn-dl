@@ -376,12 +376,21 @@ def main():
         return
 
     generated = 0
+    skipped = 0
     failed = 0
 
     for server in matched:
         print_server_info(server)
 
         if args.list_only:
+            continue
+
+        # Check if config already exists
+        expected_name = f"{args.prefix}-{server['Name']}"
+        expected_path = os.path.join(args.output_dir, f"{expected_name}.conf")
+        if os.path.exists(expected_path):
+            print(f"    -> Already exists: {expected_path}, skipping.")
+            skipped += 1
             continue
 
         # Generate keys
@@ -417,7 +426,7 @@ def main():
     client.close()
 
     if not args.list_only:
-        print(f"\nDone! Generated {generated} configs, {failed} failed.")
+        print(f"\nDone! Generated {generated} configs, {skipped} skipped, {failed} failed.")
         print(f"Configs saved to: {os.path.abspath(args.output_dir)}")
     else:
         print(f"\nListing complete. {len(matched)} servers matched.")
