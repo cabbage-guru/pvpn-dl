@@ -142,6 +142,7 @@ class ProtonVPNClient:
     """Client for the ProtonVPN API to download WireGuard configurations."""
 
     API_HOST = "account.protonvpn.com"
+    PUBLIC_API_HOST = "api.protonvpn.ch"
 
     # Server feature bitmask constants
     FEATURE_SECURE_CORE = 1
@@ -162,6 +163,7 @@ class ProtonVPNClient:
         self.uid = uid
         self.delay = delay
         self.connection = http.client.HTTPSConnection(self.API_HOST)
+        self.public_connection = http.client.HTTPSConnection(self.PUBLIC_API_HOST)
 
         cookie = http.cookies.SimpleCookie()
         cookie["AUTH-" + uid] = auth_token
@@ -174,25 +176,40 @@ class ProtonVPNClient:
             "Cookie": cookie.output(attrs=[], header="", sep="; "),
         }
 
-    def _request(self, method, path, body=None):
+    def _request(self, method, path, body=None, use_public=False):
         """Make an API request with rate limiting and error handling."""
         time.sleep(self.delay)
 
-        h = self.headers.copy()
+        conn = self.public_connection if use_public else self.connection
+
+        if use_public:
+            # Public API doesn't need auth headers
+            h = {"Accept": "application/vnd.protonmail.v1+json"}
+        else:
+            h = self.headers.copy()
+
         if body is not None:
             h["Content-Type"] = "application/json"
-            self.connection.request(method, path, body=json.dumps(body), headers=h)
+            conn.request(method, path, body=json.dumps(body), headers=h)
         else:
-            self.connection.request(method, path, headers=h)
+            conn.request(method, path, headers=h)
 
-        response = self.connection.getresponse()
+        response = conn.getresponse()
         data = response.read().decode()
 
         if response.status != 200:
+            host = self.PUBLIC_API_HOST if use_public else self.API_HOST
             print(
-                f"  API error: {response.status} {response.reason}",
+                f"  API error: {response.status} {response.reason} ({host}{path})",
                 file=sys.stderr,
             )
+            # Show response body for debugging
+            try:
+                error_body = json.loads(data)
+                print(f"  Response: {json.dumps(error_body, indent=2)}", file=sys.stderr)
+            except (json.JSONDecodeError, ValueError):
+                if data.strip():
+                    print(f"  Response: {data[:500]}", file=sys.stderr)
             if response.status == 429:
                 print(
                     "  Rate limited! Increase --delay and try again.",
@@ -203,11 +220,18 @@ class ProtonVPNClient:
         return json.loads(data)
 
     def get_servers(self):
-        """Fetch the list of all logical VPN servers."""
-        print("Fetching server list...")
-        resp = self._request("GET", "/api/vpn/logicals")
+        """Fetch the list of all logical VPN servers.
+
+        Tries the public API first (api.protonvpn.ch), falls back to
+        the authenticated endpoint (account.protonvpn.com) if that fails.
+        """
+        print("Fetching server list from public API (api.protonvpn.ch)...")
+        resp = self._request("GET", "/vpn/logicals", use_public=True)
         if resp is None:
-            print("Failed to fetch server list.", file=sys.stderr)
+            print("Public API failed, trying authenticated endpoint...", file=sys.stderr)
+            resp = self._request("GET", "/api/vpn/logicals")
+        if resp is None:
+            print("Failed to fetch server list from both endpoints.", file=sys.stderr)
             sys.exit(1)
         servers = resp.get("LogicalServers", [])
         print(f"Found {len(servers)} servers.")
@@ -250,6 +274,7 @@ class ProtonVPNClient:
 
     def close(self):
         self.connection.close()
+        self.public_connection.close()
 
     @staticmethod
     def derive_wireguard_private_key(keys):
